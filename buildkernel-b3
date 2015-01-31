@@ -1,0 +1,483 @@
+#!/bin/bash
+#
+# Build a bootable kernel for the Excito B3 miniserver.
+#
+# Please see the accompanying manpage for details.
+#
+# Copyright (c) 2015 sakaki <sakaki@deciban.com>
+#
+# License (GPL v3.0)
+# ------------------
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+set -e
+set -u
+shopt -s nullglob
+
+# Scroll to the bottom of this script to follow the main program flow.
+
+# ********************** variables ********************* 
+PROGNAME="$(basename "${0}")"
+VERSION="1.0.0"
+RED_TEXT="" GREEN_TEXT="" YELLOW_TEXT="" RESET_ATTS=""
+if [[ -v TERM && -n "${TERM}" && "${TERM}" != "dumb" ]]; then
+    RED_TEXT="$(tput setaf 1)$(tput bold)"
+    GREEN_TEXT="$(tput setaf 2)$(tput bold)"
+    YELLOW_TEXT="$(tput setaf 3)$(tput bold)"
+    RESET_ATTS="$(tput sgr0)"
+fi
+VERBOSITY=1
+VERBOSITYFLAG=""
+PREFIXSTRING="* "
+SHOWPREFIX="${GREEN_TEXT}${PREFIXSTRING}${RESET_ATTS}"
+SHOWSUFFIX=""
+BOOTMOUNT="/boot"
+INSTALLDIR="/install"
+BOOTDIR="/boot"
+LIBDIR="/lib"
+B3CPU="88FR131"
+NUMTHREADS=$(( $(nproc) + 1 ))
+NUMPUMPTHREADS=$((NUMTHREADS+1))
+DNAME="$(readlink --canonicalize "${PWD}")"
+KNAME="$(basename "${DNAME}-b3")"
+KNAME="${KNAME/linux-/Linux }"
+PUMP=""
+PORTAGEFEATURES=""
+CURRENTCONFIG="/proc/config.gz"
+TARGETCONFIG=".config"
+
+# used to unwind mountpoints on failure
+declare -A ALLMOUNTS
+
+# building on B3 (=1) or cross-compiling (=0)?
+declare -i NATIVE_BUILD=0
+
+# did we mount /boot?
+declare -i DIDMOUNT=0
+
+# program arguments (booleans in this case)
+declare -i ARG_HELP=0 ARG_VERBOSE=0 ARG_VERSION=0 ARG_USB_BUILD=0 ARG_CLEAN=0
+declare -i ARG_NOPUMP=0 ARG_MENUCONFIG=0
+
+# ***************** various functions ****************** 
+cleanup_and_exit_with_code() {
+    # add any additional cleanup code here
+    set +e
+    trap - EXIT
+    umount_all_remembered_mountpoints
+    exit $1
+}
+fn_exists() {
+    declare -f -F "${1}" > /dev/null
+    return $?
+}
+show() {
+    local MESSAGE=${1:-""}
+    local VERBLEVEL=${2:-${VERBOSITY}}
+    if (( VERBLEVEL >=1 )); then
+        echo -e "${SHOWPREFIX}${MESSAGE}${SHOWSUFFIX}"
+    fi
+}
+warning() {
+    echo -e "${YELLOW_TEXT}${PREFIXSTRING}${RESET_ATTS}${PROGNAME}: Warning: ${1}" >&2
+}
+die() {
+    echo
+    echo -e "${RED_TEXT}${PREFIXSTRING}${RESET_ATTS}${PROGNAME}: Error: ${1} - exiting" >&2
+    cleanup_and_exit_with_code 1
+}
+trap_cleanup() {
+    trap - SIGHUP SIGQUIT SIGINT SIGTERM SIGKILL EXIT
+    die "Caught signal"
+}
+trap trap_cleanup SIGHUP SIGQUIT SIGINT SIGTERM SIGKILL EXIT
+test_yn() {
+    echo -n -e "${SHOWPREFIX}${1} (y/n)? ${SHOWSUFFIX}"
+    read -r -n 1
+    echo
+    if [[ ${REPLY} =~ ^[Yy]$ ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+test_yn_need_enter() {
+    echo -n -e "${SHOWPREFIX}${1} (y/n)? ${SHOWSUFFIX}"
+    read -r
+    echo
+    if [[ ${REPLY} =~ ^[Yy]$ ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+continue_yn() {
+    if ! test_yn "${1}"; then
+        echo -e "${RED_TEXT}${PREFIXSTRING}${RESET_ATTS}Quitting" >&2
+        cleanup_and_exit_with_code 1
+    fi
+}
+suppress_colours() {
+    RED_TEXT=""
+    GREEN_TEXT=""
+    YELLOW_TEXT=""
+    RESET_ATTS=""
+    SHOWPREFIX="${PREFIXSTRING}"
+}
+suppress_colour_if_output_not_to_a_terminal() {
+    if [ ! -t 1 -o ! -t 2 ]; then
+        # we are going to a non-terminal
+        suppress_colours
+    fi
+}
+check_file_exists() {
+    if [ ! -f "${1}" ]; then
+        die "File '${1}' does not exist"
+    fi
+}
+mount_and_remember() {
+    local DEVPATH="${1}"
+    local MOUNTPOINT="${2}"
+    local TYPE=${3:-""}
+    
+    if [[ "${ALLMOUNTS[${MOUNTPOINT}]+_}" ]]; then
+        warning "Attempt to mount '${MOUNTPOINT}' more than once"
+    else
+        if [ -n "${TYPE}" ]; then
+            mount -t "${TYPE}" "${DEVPATH}" "${MOUNTPOINT}"
+        else
+            mount "${DEVPATH}" "${MOUNTPOINT}"
+        fi
+        # and remember we mounted it
+        ALLMOUNTS["${MOUNTPOINT}"]="${DEVPATH}"
+    fi
+}
+mount_and_remember_simple() {
+    local MOUNTPOINT="${1}"
+    if [[ "${ALLMOUNTS[${MOUNTPOINT}]+_}" ]]; then
+        warning "Attempt to mount '${MOUNTPOINT}' more than once"
+    else
+        mount "${MOUNTPOINT}"
+        # and remember we mounted it
+        ALLMOUNTS["${MOUNTPOINT}"]="device path from /etc/fstab"
+    fi
+}
+umount_and_forget() {
+    local MOUNTPOINT="${1}"
+    if [[ "${ALLMOUNTS[${MOUNTPOINT}]+_}" ]]; then
+        umount --lazy "${MOUNTPOINT}"
+        # and forget
+        unset -v "ALLMOUNTS[${MOUNTPOINT}]"
+    else
+        warning "Attempt to unmount '${MOUNTPOINT}', but not mounted"
+    fi
+}
+umount_all_remembered_mountpoints() {
+    local M ALLREMEMBEREDMOUNTS="${!ALLMOUNTS[@]}"
+    for M in ${ALLREMEMBEREDMOUNTS}; do
+        warning "Unmounting '${M}'"
+        umount_and_forget "${M}"
+    done
+}
+
+display_final_status() {
+    show "All done!"
+}
+if_option_set() {
+    # execute second argument as function if variable named by the first
+    # argument has value 1
+    if_option_has_value 1 "${@}"
+}
+if_option_unset() {
+    # execute second argument as function if variable named by the first
+    # argument has value 0
+    if_option_has_value 0 "${@}"
+}
+print_usage() {
+    cat << EOF
+Usage: ${PROGNAME} [options]
+
+Options:
+  -c, --clean           do a make clean at the beginning of kernel build
+  -h, --help            show this help message and exit
+  -m, --menuconfig      open kernel configuration GUI during build
+  -n, --no-pump         do not use a pump make prefix, even if compiling
+                        on a B3 with distcc available
+  -u, --usb             build a USB-bootable FIT image (install.itb),
+                        rather than the default uImage
+  -v, --verbose         display more information, where possible
+  -V, --version         display the version number of ${PROGNAME} and exit
+EOF
+}
+print_help() {
+    cat << EOF
+${PROGNAME} - build a bootable kernel for the Excito B3 miniserver
+EOF
+    print_usage
+}
+print_version() {
+    printf "%s\n" "${VERSION}"
+}
+display_usage_message_and_bail_out() {
+    if [ ! -z "${1+x}" ]; then
+        printf "%s: %s\n" "${PROGNAME}" "${1}" >&2
+    fi
+    print_usage >&2
+    cleanup_and_exit_with_code 1
+}
+internal_consistency_option_checks() {
+    :
+}
+setup_final_variables() {
+    # set appropriately, depending on whether or not cross-compiling
+    if grep -qsi "${B3CPU}" /proc/cpuinfo; then
+        NATIVE_BUILD=1
+        OBJCOPYCMD="objcopy"
+        MAKEEXTRAS=""
+        MINSTALLEXTRAS=""
+        DEPLOYROOT=""
+        ensure_boot_partition_mounted
+    else
+        OBJCOPYCMD="powerpc-e300c3-linux-gnu-objcopy"
+        MAKEEXTRAS="ARCH=arm CROSS_COMPILE=armv5tel-softfloat-linux-gnueabi-"
+        DEPLOYROOT="deploy_root"
+        MINSTALLEXTRAS="INSTALL_MOD_PATH=${DEPLOYROOT}"
+    fi
+    TGTDIR="${DEPLOYROOT}${BOOTMOUNT}"
+    if ((ARG_USB_BUILD==1)); then
+        TGTDIR+="${INSTALLDIR}"
+    else
+        TGTDIR+="${BOOTDIR}"
+    fi
+}
+process_command_line_options() {
+    local TEMP
+    declare -i RC
+    set +e
+        # error trapping off, as we want to handle errors
+        TEMP="$(getopt -o chmnuvV --long clean,help,menuconfig,no-pump,usb,verbose,version -n "${PROGNAME}" -- "${@}")"
+        RC="${?}"
+    set -e
+    if ((RC!=0)); then
+        display_usage_message_and_bail_out
+    fi
+    eval set -- "${TEMP}"
+
+    # extract options and their arguments into variables.
+    while true ; do
+        case "${1}" in
+            -c|--clean) ARG_CLEAN=1 ; shift ;;
+            -h|--help) ARG_HELP=1 ; shift ;;
+            -m|--menuconfig) ARG_MENUCONFIG=1 ; shift ;;
+            -n|--no-pump) ARG_NOPUMP=1 ; shift ;;
+            -u|--usb) ARG_USB_BUILD=1 ; shift ;;
+            -v|--verbose) ARG_VERBOSE=1 ; shift ;;
+            -V|--version) ARG_VERSION=1 ; shift ;;
+            --) shift ; break ;;
+            *) die "Internal error!" ;;
+        esac
+    done
+    # set verbosity
+    if ((ARG_VERBOSE==1)); then
+        VERBOSITY+=1
+    fi
+    if ((VERBOSITY>1)); then
+        VERBOSITYFLAG="--verbose"
+    fi
+    internal_consistency_option_checks
+    # process 'perform-then-exit' options
+    if ((ARG_HELP==1)); then
+        print_help
+        cleanup_and_exit_with_code 0
+    elif ((ARG_VERSION==1)); then
+        print_version
+        cleanup_and_exit_with_code 0
+    fi
+    setup_final_variables
+}
+ensure_boot_partition_mounted() {
+    if ! grep -qs "${BOOTMOUNT}" /proc/mounts; then
+        show "Mounting ${BOOTMOUNT}..."
+        mount_and_remember_simple "${BOOTMOUNT}"
+        DIDMOUNT=1
+    else
+        show "${BOOTMOUNT} is already mounted, leaving it that way..."
+    fi
+}
+umount_boot_if_we_mounted_it() {
+    if ((DIDMOUNT==1)); then
+        show "Unmounting ${BOOTMOUNT}..."
+        umount_and_forget "${BOOTMOUNT}"
+    fi # otherwise, leave as we found it (i.e., mounted)
+}
+setup_deploy_root_if_cross_compiling() {
+    if ((NATIVE_BUILD==0)); then
+        if [ ! -d "${DEPLOYROOT}" ]; then
+            show "Creating directory: ${DEPLOYROOT}"
+            mkdir "${DEPLOYROOT}"
+        else
+            show "Cleaning prior ${DEPLOYROOT}..."
+            for NEXTDIR in ${BOOTMOUNT} ${INSTALLDIR} ${LIBDIR}; do
+                if [ -d "${DEPLOYROOT}${NEXTDIR}" ]; then
+                    rm -rf "${DEPLOYROOT}${NEXTDIR}"
+                fi
+            done
+        fi
+    fi
+}
+build_kernel() {
+    # build the raw kernel - this will be post-processed differently
+    # depending on whether we have a disk or USB boot target
+    show "Compiling kernel (${KNAME})..."
+    if ((ARG_CLEAN==1)); then
+        show "(beginning with a make clean...)"
+        # not mrproper - so our .config file
+        # will be left alone
+        make ${MAKEEXTRAS} clean
+    fi
+    if ((ARG_MENUCONFIG==1)); then
+        show "Invoking menuconfig; select the kernel options you require..."
+        make ${MAKEEXTRAS} menuconfig
+    fi
+    ${PUMP} make -j${NUMTHREADS} ${MAKEEXTRAS} zImage
+    show "Compiling DTB..."
+    make ${MAKEEXTRAS} kirkwood-b3.dtb
+    show "Compiling modules..."
+    ${PUMP} make -j${NUMTHREADS} ${MAKEEXTRAS} modules
+    show "Installing modules..."
+    make ${MAKEEXTRAS} ${MINSTALLEXTRAS} modules_install
+    show "Kernel built successfully!"
+}
+create_patched_uimage() {
+    echo "Creating patched zImage for B3 (caches off, DTB appended)..."
+    pushd arch/arm/boot
+    # per https://lists.debian.org/debian-boot/2012/08/msg00804.html
+    echo -n -e \\x11\\x3f\\x3f\\xee >  cache_head_patch
+    echo -n -e \\x01\\x35\\xc3\\xe3 >> cache_head_patch
+    echo -n -e \\x11\\x3f\\x2f\\xee >> cache_head_patch
+    echo -n -e \\x00\\x30\\xa0\\xe3 >> cache_head_patch
+    echo -n -e \\x17\\x3f\\x07\\xee >> cache_head_patch
+    cat cache_head_patch zImage dts/kirkwood-b3.dtb > zImage-dts-appended
+    rm cache_head_patch
+    show "Creating a uImage from this, targeting 0x00008000..."
+    mkimage -A arm -O linux -T kernel -C none -a 0x00008000 -e 0x00008000 \
+      -n "${KNAME}" -d zImage-dts-appended ../../../uImage
+    rm zImage-dts-appended
+    popd
+}
+create_bootable_disk_image() {
+    declare -i UIMLEN UBOOTLOAD KERNLENLOC KERNELLEN
+    local NEXTFILE
+    
+    create_patched_uimage
+    show "Copying uImage, System.map, and config to ${TGTDIR}..."
+    mkdir -p "${TGTDIR}"
+    # make backups first
+    for NEXTFILE in uImage System.map config; do
+        if [ -s "${TGTDIR}/${NEXTFILE}" ]; then
+            mv "${TGTDIR}/${NEXTFILE}" "${TGTDIR}/${NEXTFILE}.old"
+        fi
+    done
+    cp uImage "${TGTDIR}/uImage"
+    cp System.map "${TGTDIR}/System.map"
+    cp .config "${TGTDIR}/config"
+}
+create_bootable_usb_image() {
+    local NEXTFILE
+    
+    create_patched_uimage
+    show "Copying install.itb, System.map and config to ${TGTDIR}..."
+    mkdir -p "${TGTDIR}"
+    for NEXTFILE in install.itb System.map config; do
+        if [ -s "${TGTDIR}/${NEXTFILE}" ]; then
+            mv "${TGTDIR}/${NEXTFILE}" "${TGTDIR}/${NEXTFILE}.old"
+        fi
+    done
+    cp uImage "${TGTDIR}/install.itb" # U-Boot will accept this
+    cp System.map "${TGTDIR}/System.map"
+    cp .config "${TGTDIR}/config"
+}
+finalize_image() {
+    show "Syncing filesystem, please wait..."
+    sync
+}
+display_greeting() {
+    show "Kernel build script for Excito B3 miniserver, v${VERSION}"
+    if ((NATIVE_BUILD==0)); then
+        show "Cross-compiling"
+    fi
+    if ((ARG_USB_BUILD==0)); then
+        show "Creating a uImage (for hard-drive boot)"
+    else
+        show "Creating a FIT image (for USB-key boot)"
+    fi
+}
+check_if_running_in_linux_source_dir() {
+    if [[ ! -s arch/arm/boot/dts/kirkwood-b3.dts ]]; then
+        die "Please run in the top-level Linux kernel directory"
+    fi
+}
+read_portage_features_if_necessary() {
+    if [ -z "${PORTAGEFEATURES}" ]; then
+        show "Checking Portage configuration, please wait..."
+        PORTAGEFEATURES=$(grep '^FEATURES.*$' <(emerge --info))
+    fi
+}
+check_if_using_distcc() {
+    # check for the relevant feature... turn on PUMP prefix if
+    # we find it, and we are building locally
+    if ((NATIVE_BUILD==1 && ARG_NOPUMP==0)); then
+        read_portage_features_if_necessary
+        if grep -qi "distcc-pump" <<<"${PORTAGEFEATURES}"; then
+            # set prefix for emerge in normal situation...
+            show "Portage feature distcc-pump detected: will make under pump"
+            PUMP="pump"
+            # we can also afford a bit more parallelism
+            NUMTHREADS="${NUMPUMPTHREADS}"
+        fi
+    fi
+}
+copy_config_from_proc_if_necessary() {
+    if [ ! -s "${TARGETCONFIG}" ]; then
+        if ((NATIVE_BUILD==1)) && [ -s "${CURRENTCONFIG}" ]; then
+            warning "No .config file found; will copy from running kernel's config"
+            zcat "${CURRENTCONFIG}" > "${TARGETCONFIG}"
+            make ${MAKEEXTRAS} olddefconfig
+        else
+            die "You need to provide a .config file"
+        fi
+    fi
+}
+
+# *************** start of script proper ***************
+suppress_colour_if_output_not_to_a_terminal
+process_command_line_options "${@}"
+check_if_using_distcc
+display_greeting
+check_if_running_in_linux_source_dir
+setup_deploy_root_if_cross_compiling
+# perform the build
+copy_config_from_proc_if_necessary
+build_kernel
+if ((ARG_USB_BUILD==0)); then
+    create_bootable_disk_image;
+else
+    create_bootable_usb_image;
+fi
+finalize_image
+umount_boot_if_we_mounted_it
+display_final_status
+cleanup_and_exit_with_code 1

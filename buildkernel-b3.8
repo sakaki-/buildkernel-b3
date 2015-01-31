@@ -1,0 +1,88 @@
+.TH BUILDKERNEL-B3 8 "Version 1.0.0: February 2015"
+.SH NAME
+buildkernel-b3 \- build bootable Linux kernel for the Excito B3
+.SH SYNOPSIS
+.B buildkernel-b3
+[\fIoptions\fR]
+.SH DESCRIPTION
+\fBbuildkernel-b3\fR is a script that builds a Gentoo Linux kernel
+image suitable for booting either from the B3's internal disk (default),
+or from a USB key (when the \fB--usb\fR option is specified).
+
+Any kernel so created will have the necessary code to temporarily switch off the L2 cache in early boot (per Debian workaround #658904) prepended, and the \fIkirkwood-b3\fR device tree blob appended. As such, it can be booted on a 'stock' B3 - no U-Boot flashing is necessary.
+
+You can run \fBbuildkernel-b3\fR either on the B3 directly, or on a Gentoo PC
+(with an appropriately configured \fBcrossdev\fR setup).
+If running on a PC, a
+directory \fIdeploy_root\fR will be created as a result of running the script,
+with the necessary files for you to copy across to your B3.
+If running on the
+B3 natively, the files (kernel, modules, config and System.map) will be
+moved to the correct positions for you (and prior copies of all but the modules
+backed up).
+
+\fBbuildkernel-b3\fR should be run as root, in the top level kernel source
+directory. You will need an appropriate \fI.config\fR file in place when
+building the kernel (however, if running on the B3, the running kernel's config will
+be used as a fallback, if one is available via \fI/proc/config.gz\fR,
+and no other \fI.config\fR is found).
+.SH OPTIONS
+.TP
+.BR \-c ", " \-\-clean
+Specifies that a \fBmake clean\fR should be carried out in the kernel source
+directory prior to building (this will leave the \fI.config\fR file intact).
+Most of the time, it is fine not to \fBmake clean\fR.
+.TP
+.BR \-h ", " \-\-help
+Displays a short help screen, and exits.
+.TP
+.BR \-m ", " \-\-menuconfig
+Specifies that the GUI-based kernel configuration tool (\fBmake menuconfig\fR)
+should be invoked at the start of the build.
+.TP
+.BR \-n ", " \-\-no\-pump
+Normally, when building on the B3, this script will invoke \fBmake\fR(1)
+with the \fBpump\fR(1) prefix (to distribute compilation and pre-processing), if
+the \fBdistcc-pump\fR \fBPortage\fR(5) feature is detected.
+Specify this option to force a local build instead.
+.TP
+.BR \-u ", " \-\-usb
+Instructs \fBbuildkernel-b3\fR to create a USB-bootable FIT image (8313E21.itb),
+rather than the default uImage.
+.TP
+.BR \-v ", " \-\-verbose
+Provides more verbose output from invoked tools, where possible.
+.TP
+.BR \-V ", " \-\-version
+Displays the version number of \fBbuildkernel-b3\fR, and exits.
+
+.SH BUGS
+.br
+.IP \(bu 2
+\fBbuildkernel-b3\fR currently executes the kernel build process as the
+root user.
+It would be a little more hygienic to build as a non-privileged user,
+and then install as root.
+Also, this script should really be integrated into the \fIarch/powerpc/boot\fR
+wrapper build process, rather than be shipped standalone.
+.IP \(bu 2
+Currently, you must override the bootloader-provided command line in
+your kernel \fI.config\fR (since the former will otherwise specify an
+incorrect root, unless you reflash the U-Boot environment...
+which we are trying to avoid).
+.RE
+.SH COPYRIGHT
+.nf
+Copyright \(co 2015 sakaki
+License GPLv3+ (GNU GPL version 3 or later)
+<http://gnu.org/licenses/gpl.html>
+
+This is free software, you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+.fi
+.SH AUTHORS
+sakaki \(em send bug reports or comments to <sakaki@deciban.com>
+.SH "SEE ALSO"
+.BR make (1),
+.BR pump (1),
+.BR portage (5).
