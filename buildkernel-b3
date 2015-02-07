@@ -362,7 +362,7 @@ build_kernel() {
     show "Kernel built successfully!"
 }
 create_patched_uimage() {
-    echo "Creating patched zImage for B3 (caches off, DTB appended)..."
+    show "Creating patched zImage for B3 (caches off, DTB appended)..."
     pushd arch/arm/boot
     # per https://lists.debian.org/debian-boot/2012/08/msg00804.html
     echo -n -e \\x11\\x3f\\x3f\\xee >  cache_head_patch
