@@ -31,7 +31,7 @@ shopt -s nullglob
 
 # ********************** variables ********************* 
 PROGNAME="$(basename "${0}")"
-VERSION="1.0.1"
+VERSION="1.0.2"
 RED_TEXT="" GREEN_TEXT="" YELLOW_TEXT="" RESET_ATTS=""
 if [[ -v TERM && -n "${TERM}" && "${TERM}" != "dumb" ]]; then
     RED_TEXT="$(tput setaf 1)$(tput bold)"
@@ -58,6 +58,11 @@ PUMP=""
 PORTAGEFEATURES=""
 CURRENTCONFIG="/proc/config.gz"
 TARGETCONFIG=".config"
+CUSTOMDTSPATH=""
+DTBNAME="kirkwood-b3.dtb"
+DTSNAME="kirkwood-b3.dts"
+DTSPATH="arch/arm/boot/dts/${DTSNAME}"
+DTSOLDPATH="${DTSPATH}.orig"
 
 # used to unwind mountpoints on failure
 declare -A ALLMOUNTS
@@ -212,6 +217,7 @@ Usage: ${PROGNAME} [options]
 
 Options:
   -c, --clean           do a make clean at the beginning of kernel build
+  -d, --custom-dts      specify custom device tree source file to use
   -h, --help            show this help message and exit
   -m, --menuconfig      open kernel configuration GUI during build
   -n, --no-pump         do not use a pump make prefix, even if compiling
@@ -239,7 +245,12 @@ display_usage_message_and_bail_out() {
     cleanup_and_exit_with_code 1
 }
 internal_consistency_option_checks() {
-    :
+    if [[ -n "${CUSTOMDTSPATH}" ]]; then
+        CUSTOMDTSPATH="$(realpath "${CUSTOMDTSPATH}")"
+        if [[ ! -f "${CUSTOMDTSPATH}" ]]; then
+            die "Custom DTS file '${CUSTOMDTSPATH}' not found"
+        fi
+    fi
 }
 setup_final_variables() {
     # set appropriately, depending on whether or not cross-compiling
@@ -268,7 +279,7 @@ process_command_line_options() {
     declare -i RC
     set +e
         # error trapping off, as we want to handle errors
-        TEMP="$(getopt -o chmnuvV --long clean,help,menuconfig,no-pump,usb,verbose,version -n "${PROGNAME}" -- "${@}")"
+        TEMP="$(getopt -o cd:hmnuvV --long clean,custom-dts:,help,menuconfig,no-pump,usb,verbose,version -n "${PROGNAME}" -- "${@}")"
         RC="${?}"
     set -e
     if ((RC!=0)); then
@@ -280,6 +291,11 @@ process_command_line_options() {
     while true ; do
         case "${1}" in
             -c|--clean) ARG_CLEAN=1 ; shift ;;
+            -d|--custom-dts)
+                case "${2}" in
+                    "") shift 2 ;;
+                    *) CUSTOMDTSPATH="${2}" ; shift 2 ;;
+                esac ;;
             -h|--help) ARG_HELP=1 ; shift ;;
             -m|--menuconfig) ARG_MENUCONFIG=1 ; shift ;;
             -n|--no-pump) ARG_NOPUMP=1 ; shift ;;
@@ -353,8 +369,22 @@ build_kernel() {
         make ${MAKEEXTRAS} menuconfig
     fi
     ${PUMP} make -j${NUMTHREADS} ${MAKEEXTRAS} zImage
+    # if we have a custom version, take appropriate action...
+    if [[ -n "${CUSTOMDTSPATH}" ]]; then
+        if [[ -s "${DTSOLDPATH}" ]]; then
+            warning "File '${DTSOLDPATH}' exists, retaining..."
+        else
+            show "Backing up existing DTS..."
+            cp -v "${DTSPATH}" "${DTSOLDPATH}"
+        fi
+        show "Overwriting DTS with custom version provided..."
+        cp -v  "${CUSTOMDTSPATH}" "${DTSPATH}"
+    elif [[ -s "${DTSOLDPATH}" ]]; then
+        warning "Using custom DTS"
+        warning "(original in '${DTSOLDPATH}')..."
+    fi
     show "Compiling DTB..."
-    make ${MAKEEXTRAS} kirkwood-b3.dtb
+    make ${MAKEEXTRAS} "${DTBNAME}"
     show "Compiling modules..."
     ${PUMP} make -j${NUMTHREADS} ${MAKEEXTRAS} modules
     show "Installing modules..."
@@ -370,7 +400,7 @@ create_patched_uimage() {
     echo -n -e \\x11\\x3f\\x2f\\xee >> cache_head_patch
     echo -n -e \\x00\\x30\\xa0\\xe3 >> cache_head_patch
     echo -n -e \\x17\\x3f\\x07\\xee >> cache_head_patch
-    cat cache_head_patch zImage dts/kirkwood-b3.dtb > zImage-dts-appended
+    cat cache_head_patch zImage "dts/${DTBNAME}" > zImage-dts-appended
     rm cache_head_patch
     show "Creating a uImage from this, targeting 0x00008000..."
     mkimage -A arm -O linux -T kernel -C none -a 0x00008000 -e 0x00008000 \

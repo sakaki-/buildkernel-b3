@@ -1,4 +1,4 @@
-.TH BUILDKERNEL-B3 8 "Version 1.0.1: February 2015"
+.TH BUILDKERNEL-B3 8 "Version 1.0.2: February 2015"
 .SH NAME
 buildkernel-b3 \- build bootable Linux kernel for the Excito B3
 .SH SYNOPSIS
@@ -32,6 +32,22 @@ and no other \fI.config\fR is found).
 Specifies that a \fBmake clean\fR should be carried out in the kernel source
 directory prior to building (this will leave the \fI.config\fR file intact).
 Most of the time, it is fine not to \fBmake clean\fR.
+.TP
+.BR \-d ", " \-\-custom\-dts\=PATH_TO_DTS
+Specifies that the given device tree source (DTS) file should be used
+by the device tree compiler, in place of the default
+\fI./arch/arm/boot/dts/kirkwood-b3.dts\fR.
+You can use this to add custom hardware functionality to your B3 (such
+as different boot-time LED configurations, etc.).
+
+The original file will be backed up to
+\fI./arch/arm/boot/dts/kirkwood-b3.dts.orig\fR,
+when building a kernel using this option, if no
+such backup file previously exists (if one does already exist, it will be left
+untouched, but your specified custom DTS will still be copied over
+\fI./arch/arm/boot/dts/kirkwood-b3.dts\fR).
+Accordingly, subsequent invocations (even without the \fB--custom-dts\fR option)
+will use your custom DTS, unless you manually revert the backup.
 .TP
 .BR \-h ", " \-\-help
 Displays a short help screen, and exits.
