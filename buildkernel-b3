@@ -4,7 +4,7 @@
 #
 # Please see the accompanying manpage for details.
 #
-# Copyright (c) 2015 sakaki <sakaki@deciban.com>
+# Copyright (c) 2015-17 sakaki <sakaki@deciban.com>
 #
 # License (GPL v3.0)
 # ------------------
@@ -31,7 +31,7 @@ shopt -s nullglob
 
 # ********************** variables ********************* 
 PROGNAME="$(basename "${0}")"
-VERSION="1.0.3"
+VERSION="1.0.4"
 RED_TEXT="" GREEN_TEXT="" YELLOW_TEXT="" RESET_ATTS=""
 if [[ -v TERM && -n "${TERM}" && "${TERM}" != "dumb" ]]; then
     RED_TEXT="$(tput setaf 1)$(tput bold)"
@@ -75,7 +75,7 @@ declare -i DIDMOUNT=0
 
 # program arguments (booleans in this case)
 declare -i ARG_HELP=0 ARG_VERBOSE=0 ARG_VERSION=0 ARG_USB_BUILD=0 ARG_CLEAN=0
-declare -i ARG_NOPUMP=0 ARG_MENUCONFIG=0
+declare -i ARG_NOPUMP=0 ARG_MENUCONFIG=0 ARG_ZIMAGE_BUILD=0
 
 # ***************** various functions ****************** 
 cleanup_and_exit_with_code() {
@@ -226,6 +226,7 @@ Options:
                         rather than the default uImage
   -v, --verbose         display more information, where possible
   -V, --version         display the version number of ${PROGNAME} and exit
+  -z, --zimage          create a raw zImage (no cache patch or appended DTB)
 EOF
 }
 print_help() {
@@ -250,6 +251,9 @@ internal_consistency_option_checks() {
         if [[ ! -f "${CUSTOMDTSPATH}" ]]; then
             die "Custom DTS file '${CUSTOMDTSPATH}' not found"
         fi
+    fi
+    if ((ARG_USB_BUILD==1 && ARG_ZIMAGE_BUILD==1)); then
+        die "At most one of --usb and --zimage can be selected"
     fi
 }
 setup_final_variables() {
@@ -279,7 +283,7 @@ process_command_line_options() {
     declare -i RC
     set +e
         # error trapping off, as we want to handle errors
-        TEMP="$(getopt -o cd:hmnuvV --long clean,custom-dts:,help,menuconfig,no-pump,usb,verbose,version -n "${PROGNAME}" -- "${@}")"
+        TEMP="$(getopt -o cd:hmnuvVz --long clean,custom-dts:,help,menuconfig,no-pump,usb,verbose,version,zimage -n "${PROGNAME}" -- "${@}")"
         RC="${?}"
     set -e
     if ((RC!=0)); then
@@ -302,6 +306,7 @@ process_command_line_options() {
             -u|--usb) ARG_USB_BUILD=1 ; shift ;;
             -v|--verbose) ARG_VERBOSE=1 ; shift ;;
             -V|--version) ARG_VERSION=1 ; shift ;;
+            -z|--zimage) ARG_ZIMAGE_BUILD=1 ; shift ;;
             --) shift ; break ;;
             *) die "Internal error!" ;;
         esac
@@ -410,18 +415,25 @@ create_patched_uimage() {
 }
 create_bootable_disk_image() {
     declare -i UIMLEN UBOOTLOAD KERNLENLOC KERNELLEN
-    local NEXTFILE
-    
-    create_patched_uimage
-    show "Copying uImage, System.map, and config to ${TGTDIR}..."
+    local NEXTFILE IMAGE_SOURCE IMAGE_TARGET
+    if ((ARG_ZIMAGE_BUILD==0)); then
+    	create_patched_uimage
+        IMAGE_SOURCE="uImage"
+        IMAGE_TARGET="uImage"
+    else
+        IMAGE_SOURCE="arch/arm/boot/zImage"
+        IMAGE_TARGET="zImage"
+    fi
+    show "Copying ${IMAGE_TARGET}, DTB, System.map, and config to ${TGTDIR}..."
     mkdir -p "${TGTDIR}"
     # make backups first
-    for NEXTFILE in uImage System.map config; do
+    for NEXTFILE in "${IMAGE_TARGET}" "${DTBNAME}" System.map config; do
         if [ -s "${TGTDIR}/${NEXTFILE}" ]; then
             mv "${TGTDIR}/${NEXTFILE}" "${TGTDIR}/${NEXTFILE}.old"
         fi
     done
-    cp uImage "${TGTDIR}/uImage"
+    cp "${IMAGE_SOURCE}" "${TGTDIR}/${IMAGE_TARGET}"
+    cp "arch/arm/boot/dts/${DTBNAME}" "${TGTDIR}/${DTBNAME}"
     cp System.map "${TGTDIR}/System.map"
     cp .config "${TGTDIR}/config"
 }
@@ -429,14 +441,15 @@ create_bootable_usb_image() {
     local NEXTFILE
     
     create_patched_uimage
-    show "Copying install.itb, System.map and config to ${TGTDIR}..."
+    show "Copying install.itb, DTB, System.map and config to ${TGTDIR}..."
     mkdir -p "${TGTDIR}"
-    for NEXTFILE in install.itb System.map config; do
+    for NEXTFILE in install.itb "${DTBNAME}" System.map config; do
         if [ -s "${TGTDIR}/${NEXTFILE}" ]; then
             mv "${TGTDIR}/${NEXTFILE}" "${TGTDIR}/${NEXTFILE}.old"
         fi
     done
     cp uImage "${TGTDIR}/install.itb" # U-Boot will accept this
+    cp "arch/arm/boot/dts/${DTBNAME}" "${TGTDIR}/${DTBNAME}"
     cp System.map "${TGTDIR}/System.map"
     cp .config "${TGTDIR}/config"
 }
