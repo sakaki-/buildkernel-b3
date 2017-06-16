@@ -31,7 +31,7 @@ shopt -s nullglob
 
 # ********************** variables ********************* 
 PROGNAME="$(basename "${0}")"
-VERSION="1.0.5"
+VERSION="1.0.6"
 RED_TEXT="" GREEN_TEXT="" YELLOW_TEXT="" RESET_ATTS=""
 if [[ -v TERM && -n "${TERM}" && "${TERM}" != "dumb" ]]; then
     RED_TEXT="$(tput setaf 1)$(tput bold)"
@@ -274,7 +274,7 @@ setup_final_variables() {
     TGTDIR="${DEPLOYROOT}${BOOTMOUNT}"
     if ((ARG_USB_BUILD==1)); then
         TGTDIR+="${INSTALLDIR}"
-    else
+    elif ((ARG_ZIMAGE_BUILD==0)); then
         TGTDIR+="${BOOTDIR}"
     fi
 }
